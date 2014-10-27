@@ -118,7 +118,6 @@ class RegistrationIT extends AbstractIT {
         def userToRegister = [email: 'email@example.org', password: 'password']
 
         def responseStatus
-        def createdUserId
 
         when:
         HTTPBuilder httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
@@ -129,10 +128,6 @@ class RegistrationIT extends AbstractIT {
             body = userToRegister
 
             response.success = { resp ->
-                responseStatus = resp.statusLine.statusCode
-            }
-
-            response.failure = { resp ->
                 responseStatus = resp.statusLine.statusCode
             }
         }
@@ -146,6 +141,7 @@ class RegistrationIT extends AbstractIT {
         !user.isActive()
         Extension extension = user.getExtension('urn:scim:schemas:osiam:2.0:Registration')
         extension.getField('activationToken', ExtensionFieldType.STRING) != null
+        user.getGroups().get(0).getDisplay().equalsIgnoreCase("Test")
 
         //Waiting at least 5 seconds for an E-Mail but aborts instantly if one E-Mail was received
         mailServer.waitForIncomingEmail(5000, 1)
@@ -162,7 +158,6 @@ class RegistrationIT extends AbstractIT {
         def userToRegister = [email: 'email@example.org', password: 'password']
 
         def responseStatus
-        def createdUserId
 
         when:
         HTTPBuilder httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
@@ -173,10 +168,6 @@ class RegistrationIT extends AbstractIT {
             body = userToRegister
 
             response.success = { resp ->
-                responseStatus = resp.statusLine.statusCode
-            }
-
-            response.failure = { resp ->
                 responseStatus = resp.statusLine.statusCode
             }
         }
@@ -219,8 +210,6 @@ class RegistrationIT extends AbstractIT {
         def accessToken = osiamConnector.retrieveAccessToken()
 
         def responseStatus
-        def activeFlag
-        def token
 
         when:
         def httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
@@ -232,17 +221,50 @@ class RegistrationIT extends AbstractIT {
             response.success = { resp ->
                 responseStatus = resp.statusLine.statusCode
             }
-
-            response.failure = { resp ->
-                responseStatus = resp.statusLine.statusCode
-            }
         }
 
         then:
         responseStatus == 200
 
         osiamConnector.getUser(createdUserId, accessToken).active
-        token == null
+    }
+
+    def 'The registration controller should act like the user was not already activated if an user activated when he is already activate'() {
+        given:
+        def createdUserId = 'cef9452e-00a9-4cec-a086-d171374febef'
+        def activationToken = 'cef9452e-00a9-4cec-a086-a171374febef'
+
+        def accessToken = osiamConnector.retrieveAccessToken()
+
+        def firstResponseStatus
+        def secondResponseStatus
+
+        when:
+        def httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
+
+        httpClient.request(Method.GET) { req ->
+            uri.path = REGISTRATION_ENDPOINT + '/registration/activation'
+            uri.query = [userId:createdUserId, activationToken:activationToken]
+
+            response.success = { resp ->
+                firstResponseStatus = resp.statusLine.statusCode
+            }
+        }
+
+        httpClient.request(Method.GET) { req ->
+            uri.path = REGISTRATION_ENDPOINT + '/registration/activation'
+            uri.query = [userId:createdUserId, activationToken:activationToken]
+
+            response.success = { resp ->
+                secondResponseStatus = resp.statusLine.statusCode
+            }
+        }
+
+        then:
+        firstResponseStatus == 200
+        secondResponseStatus == 200
+
+        osiamConnector.getUser(createdUserId, accessToken).active
     }
 
     def 'A registration of an user with client defined extensions'() {
@@ -264,10 +286,6 @@ class RegistrationIT extends AbstractIT {
             response.success = { resp, json ->
                 responseStatus = resp.statusLine.statusCode
             }
-
-            response.failure = { resp ->
-                responseStatus = resp.statusLine.statusCode
-            }
         }
 
         then:
@@ -282,6 +300,7 @@ class RegistrationIT extends AbstractIT {
         Extension registeredExtension2 = registeredUser.getExtension('urn:client:extension')
         registeredExtension2.getField('age', ExtensionFieldType.STRING) != null
         registeredExtension2.getField('age', ExtensionFieldType.STRING) == '12'
+        registeredUser.getGroups().get(0).getDisplay().equalsIgnoreCase("Test")
 
         //Waiting at least 5 seconds for an E-Mail but aborts instantly if one E-Mail was received
         mailServer.waitForIncomingEmail(5000, 1)
@@ -314,10 +333,6 @@ class RegistrationIT extends AbstractIT {
             response.success = { resp, json ->
                 responseStatus = resp.statusLine.statusCode
             }
-
-            response.failure = { resp ->
-                responseStatus = resp.statusLine.statusCode
-            }
         }
 
         Query queryString = new QueryBuilder().filter("userName eq \"email@example.org\"").build()
@@ -327,6 +342,7 @@ class RegistrationIT extends AbstractIT {
         Extension registeredExtension1 = registeredUser.getExtension('urn:scim:schemas:osiam:2.0:Registration')
         registeredExtension1.getField('activationToken', ExtensionFieldType.STRING) != null
         registeredUser.getExtension('urn:client:extension')
+        registeredUser.getGroups().get(0).getDisplay().equalsIgnoreCase("Test")
 
         then:
         thrown(NoSuchElementException)
@@ -341,12 +357,10 @@ class RegistrationIT extends AbstractIT {
         Message[] messages = mailServer.getReceivedMessages()
         messages.length == 1
     }
-    
-    def 'A registration of an user with malformed email and blank password gets bad request'() {
-        given:
-        def accessToken = osiamConnector.retrieveAccessToken()
 
-        def userToRegister = [email: 'email', password: ' ']
+    def 'Registration of a user with malformed email returns HTTP status 400 (bad request)'() {
+        given:
+        def userToRegister = [email: 'email']
 
         def responseStatus
 
@@ -357,9 +371,27 @@ class RegistrationIT extends AbstractIT {
             uri.path = REGISTRATION_ENDPOINT + '/registration'
             body = userToRegister
 
-            response.success = { resp, json ->
+            response.failure = { resp ->
                 responseStatus = resp.statusLine.statusCode
             }
+        }
+
+        then:
+        responseStatus == 400
+    }
+
+    def 'Registration of a user with malformed email and empty password returns HTTP status 400 (bad request)'() {
+        given:
+        def userToRegister = [email: 'email', password: '', profileUrl: 'not an url', photo: ' hello ']
+
+        def responseStatus
+
+        when:
+        def httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
+
+        httpClient.request(Method.POST, ContentType.URLENC) { req ->
+            uri.path = REGISTRATION_ENDPOINT + '/registration'
+            body = userToRegister
 
             response.failure = { resp ->
                 responseStatus = resp.statusLine.statusCode
@@ -368,5 +400,60 @@ class RegistrationIT extends AbstractIT {
 
         then:
         responseStatus == 400
+    }
+    
+    def 'The plugin caused an validation error for registration of an user'() {
+        given:
+        def userToRegister = [email: 'email@osiam.com', password: '0123456789']
+
+        def responseStatus
+        def responseContent
+
+        when:
+        def httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
+
+        httpClient.request(Method.POST, ContentType.TEXT) { req ->
+            uri.path = REGISTRATION_ENDPOINT + '/registration'
+            send ContentType.URLENC, userToRegister
+
+            response.failure = { resp, html ->
+                responseStatus = resp.statusLine.statusCode
+                responseContent = html.text
+            }
+        }
+
+        then:
+        responseStatus == 400
+        responseContent.contains('<div class="alert alert-danger">')
+        responseContent.contains('must end with .org!')
+    }
+
+    def 'The registration controller should escape the displayName'() {
+        given:
+        def userToRegister = [email: 'email@example.org', password: 'password', displayName: "<script>alert('hello!');</script>"]
+
+        def responseStatus
+
+        when:
+        HTTPBuilder httpClient = new HTTPBuilder(REGISTRATION_ENDPOINT)
+
+        httpClient.request(Method.POST, ContentType.URLENC) { req ->
+            headers.'Accept-Language' = 'en, en-US'
+            uri.path = REGISTRATION_ENDPOINT + '/registration'
+            body = userToRegister
+
+            response.success = { resp ->
+                responseStatus = resp.statusLine.statusCode
+            }
+        }
+
+        then:
+        responseStatus == 201
+
+        Query query = new QueryBuilder().filter("userName eq \"email@example.org\"").build()
+        SCIMSearchResult<User> users = osiamConnector.searchUsers(query, accessToken)
+        User user = users.getResources()[0]
+        user.emails[0].value == 'email@example.org'
+        user.displayName == '&lt;script&gt;alert(&#39;hello!&#39;);&lt;/script&gt;'
     }
 }

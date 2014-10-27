@@ -27,8 +27,12 @@ import groovyx.net.http.ContentType
 import groovyx.net.http.HTTPBuilder
 import groovyx.net.http.Method
 
+import org.osiam.client.OsiamConnector;
+import org.osiam.client.exception.UnauthorizedException
 import org.osiam.client.oauth.AccessToken
+import org.osiam.client.oauth.Scope
 import org.osiam.resources.scim.Email
+import org.osiam.resources.scim.UpdateUser;
 import org.osiam.resources.scim.User
 
 import spock.lang.Unroll
@@ -78,21 +82,23 @@ class ControllerIT extends AbstractIT {
         assert responseContentType == expectedResponseType
 
         where:
-        testCase | requestPath | contentType        | expectedResponseCode | expectedResponseType
-        "a"      | "/Users"    | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
-        "b"      | "/Users/"   | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
-        "c"      | "/Groups"   | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
-        "d"      | "/Groups/"  | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
-        "e"      | "/Users"    | ContentType.ANY    | 200                  | "application/json;charset=UTF-8"
-        "f"      | "/Users"    | ContentType.TEXT   | 406                  | null
-        "g"      | "/Users"    | ContentType.BINARY | 406                  | null
-        "h"      | "/Users"    | ContentType.HTML   | 406                  | null
-        "i"      | "/Users"    | ContentType.URLENC | 406                  | null
-        "j"      | "/Users"    | ContentType.XML    | 406                  | null
-        "k"      | "/Users"    | "invalid"          | 406                  | null
-        "l"      | "/Users"    | "/"                | 406                  | null
-        "m"      | "/Metrics"  |  ContentType.JSON  | 200                  | "application/json"
-        "n"      | "/Metrics/" |  ContentType.JSON  | 200                  | "application/json"
+        testCase | requestPath                    | contentType        | expectedResponseCode | expectedResponseType
+        "a"      | "/Users"                       | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
+        "b"      | "/Users/"                      | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
+        "c"      | "/Groups"                      | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
+        "d"      | "/Groups/"                     | ContentType.JSON   | 200                  | "application/json;charset=UTF-8"
+        "e"      | "/Users"                       | ContentType.ANY    | 200                  | "application/json;charset=UTF-8"
+        "f"      | "/Users"                       | ContentType.TEXT   | 406                  | null
+        "g"      | "/Users"                       | ContentType.BINARY | 406                  | null
+        "h"      | "/Users"                       | ContentType.HTML   | 406                  | null
+        "i"      | "/Users"                       | ContentType.URLENC | 406                  | null
+        "j"      | "/Users"                       | ContentType.XML    | 406                  | null
+        "k"      | "/Users"                       | "invalid"          | 406                  | null
+        "l"      | "/Users"                       | "/"                | 406                  | null
+        "m"      | "/Metrics"                     |  ContentType.JSON  | 200                  | "application/json; charset=UTF-8"
+        "n"      | "/Metrics/"                    |  ContentType.JSON  | 200                  | "application/json; charset=UTF-8"
+        "o"      | "/osiam/extension-definition"  |  ContentType.JSON  | 200                  | "application/json;charset=UTF-8"
+        "p"      | "/osiam/extension-definition/" |  ContentType.JSON  | 200                  | "application/json;charset=UTF-8"
     }
 
     @Unroll
@@ -244,5 +250,152 @@ class ControllerIT extends AbstractIT {
         then: "the user should be retrieved without triggering an exception"
         responseStatusCode == 200
         responseContent.Resources[0].userName == 'marissa'
+    }
+
+    def 'OSNG-444: A request to revoke a valid token should invalidate the token'() {
+
+    	given: 'a valid access token'
+    	AccessToken accessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+
+    	when: 'a token revocation is performed'
+    	AccessToken validationResult = osiamConnector.validateAccessToken(accessToken)
+    	osiamConnector.revokeAccessToken(accessToken)
+    	osiamConnector.validateAccessToken(accessToken) // authorization should now be invalid
+
+    	then: 'the token should be revoked'
+    	validationResult.expired==false
+    	thrown(UnauthorizedException)
+    }
+
+    def 'OSNG-444: A request to revoke an invalid token is not authorized'() {
+
+        given: 'an invalid access token'
+        AccessToken accessToken = new AccessToken.Builder("invalid").build()
+
+        when: 'a token revocation is performed'
+        osiamConnector.revokeAccessToken(accessToken)
+
+        then: 'the request is not authorized'
+        thrown(UnauthorizedException)
+    }
+
+    def 'OSNG-444: Subsequent requests to revoke a valid token should not be authorized'() {
+
+        given: 'a valid access token'
+        AccessToken accessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+
+        when: 'multiple token revocations are performed'
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken)
+        osiamConnector.revokeAccessToken(accessToken)
+        osiamConnector.revokeAccessToken(accessToken)
+
+        then: 'subsequent requests are not authorized'
+        thrown(UnauthorizedException)
+    }
+
+    def 'OSNG-467: A request to revoke access tokens of a given user should invalidate his token'() {
+        given: 'a valid access token'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+
+        when: 'a token revocation is performed'
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken)
+        osiamConnector.revokeAllAccessTokens(userId, serviceAccessToken)
+        validationResult = osiamConnector.validateAccessToken(accessToken)
+
+        then: 'the tokens should be invalid'
+        validationResult.expired==false
+        thrown(UnauthorizedException)
+    }
+
+    def 'OSNG-467: Repeating requests to revoke access tokens of a given user should not have negative effect'() {
+        given: 'valid access tokens'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+
+        when: 'multiple token revocations are performed'
+        osiamConnector.revokeAllAccessTokens(userId, serviceAccessToken)
+        osiamConnector.revokeAllAccessTokens(userId, serviceAccessToken)
+
+        then: 'nothing should happen'
+    }
+
+    def 'OSNG-467: Deactivating a user should revoke his access token'() {
+        given:'active user with valid access token'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+        UpdateUser updateUser = new UpdateUser.Builder().updateActive(false).build()
+
+        when:'the user is deactivated'
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken) // should be valid
+        User updatedUser = osiamConnector.updateUser(userId, updateUser, serviceAccessToken)
+        validationResult = osiamConnector.validateAccessToken(accessToken) // should not be authorized
+
+        then:'the user should be deactivated and the access token should be revoked'
+        updatedUser.isActive()==false
+        thrown(UnauthorizedException)
+    }
+
+    def 'OSNG-467: Updating a user without deactivating him should not revoke his access token'() {
+        given:'active user with valid access token'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+        UpdateUser updateUser = new UpdateUser.Builder().updateDisplayName('Marissa').build()
+
+        when:'the user is updated'
+        User updatedUser = osiamConnector.updateUser(userId, updateUser, serviceAccessToken)
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken)
+
+        then:'update was successful and the token is still valid'
+        updatedUser.getDisplayName() == 'Marissa'
+        validationResult.expired == false
+    }
+
+    def 'OSNG-467: Replacing a user with deactivating him should revoke his access token'() {
+        given:'active user with valid access token'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+        User user = osiamConnector.getUser(userId, serviceAccessToken)
+        User newUser = new User.Builder(user).setActive(false).build()
+
+        when:'the user is replaced'
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken) // should be valid
+        User replacedUser = osiamConnector.replaceUser(userId, newUser, serviceAccessToken)
+        validationResult = osiamConnector.validateAccessToken(accessToken) // should not be authorized
+
+        then:'the user should be deactivated and the access token should be revoked'
+        replacedUser.isActive()==false
+        thrown(UnauthorizedException)
+    }
+
+    def 'OSNG-467: Replacing a user without deactivating him should not revoke his access token'() {
+        given:'active user with valid access token'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+        User user = osiamConnector.getUser(userId, serviceAccessToken)
+        User newUser = new User.Builder(user).setDisplayName('Marissa').build()
+
+        when:'the user is replaced'
+        User replacedUser = osiamConnector.replaceUser(userId, newUser, serviceAccessToken)
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken)
+
+        then:'update was successful and the token is still valid'
+        replacedUser.getDisplayName() == 'Marissa'
+        validationResult.expired == false
+    }
+
+    def 'OSNG-479: Deleting a user should revoke his access token'() {
+        given:'active user with valid access token'
+        def userId = "cef9452e-00a9-4cec-a086-d171374ffbef"
+        AccessToken serviceAccessToken = osiamConnectorForClientCredentialsGrant.retrieveAccessToken()
+
+        when:'the user is deleted'
+        AccessToken validationResult = osiamConnector.validateAccessToken(accessToken) // should be valid
+        osiamConnector.deleteUser(userId, serviceAccessToken)
+        validationResult = osiamConnector.validateAccessToken(accessToken) // should not be authorized
+
+        then:'the access token should be revoked'
+        validationResult.expired == false
+        thrown(UnauthorizedException)
     }
 }
